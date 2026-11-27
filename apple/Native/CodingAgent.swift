@@ -23,8 +23,37 @@ enum CodingAgent {
     For a new file use the same edit action. Propose one file at a time. The user reviews edits before writing.
     Do not claim to have applied a change or executed commands. The app has no shell.
     """
+    typealias AutoApply = (EditProposal) async throws -> Void
+
+    /// Finds the action object in a reply. Reasoning models often write their thinking
+    /// first and put the JSON last (sometimes in a code fence or after </think>).
+    /// Returns the text before the object (kept visible to the user) and the action.
+    private static func extract(_ raw: String) -> (lead: String, action: Action)? {
+        let text = raw.trimmingCharacters(in:.whitespacesAndNewlines)
+        if let whole = try? JSONDecoder().decode(Action.self, from:Data(text.utf8)) { return ("", whole) }
+        let chars = Array(text)
+        let ends = chars.indices.filter { chars[$0] == "}" }
+        var starts = [Int]()
+        for i in chars.indices where chars[i] == "{" {
+            var j = i + 1
+            while j < chars.count, chars[j].isWhitespace { j += 1 }
+            if String(chars[j..<min(chars.count, j + 8)]) == "\"action\"" { starts.append(i) }
+        }
+        for start in starts.reversed() {
+            for end in ends.reversed() where end > start {
+                let candidate = String(chars[start...end])
+                if let action = try? JSONDecoder().decode(Action.self, from:Data(candidate.utf8)) {
+                    var lead = String(chars[..<start]).trimmingCharacters(in:.whitespacesAndNewlines)
+                    if lead.hasSuffix("```json") { lead = String(lead.dropLast(7)) } else if lead.hasSuffix("```") { lead = String(lead.dropLast(3)) }
+                    return (lead.trimmingCharacters(in:.whitespacesAndNewlines), action)
+                }
+            }
+        }
+        return nil
+    }
+
     static func run(prompt: String, history: [Turn], notes: String, files: ProjectFiles, mode: AssistantMode = .standard,
-                    ask: Ask, activity: (String) -> Void) async throws -> AgentReply {
+                    autoApply: AutoApply? = nil, ask: Ask, activity: (String) -> Void) async throws -> AgentReply {
         let light = mode == .light
         var thread = Array(history.suffix(light ? 4 : 10)).map { Turn(role:$0.role,content:String($0.content.prefix(light ? 1200 : 2600))) }
         while thread.first?.role == "assistant" { thread.removeFirst() }
@@ -34,22 +63,33 @@ enum CodingAgent {
             return AgentReply(answer:answer,servedBy:served,proposal:nil)
         }
         var readFiles = [String:Data]()
-        let system = instruction + (light || notes.isEmpty ? "" : "\nProject notes supplied by the user:\n" + String(notes.prefix(1800)))
-        for _ in 0..<(light ? 5 : 10) {
+        var saved = [String]()
+        var thinking = [String]()
+        var lastModel = ""
+        // With pre-approval the agent keeps working after each saved file.
+        let auto = autoApply != nil && mode != .quick
+        let system = instruction + (auto ? "\nPre-approval is on: edits are saved immediately. After each saved file continue with the next step, and answer when the whole task is done." : "") +
+            (light || notes.isEmpty ? "" : "\nProject notes supplied by the user:\n" + String(notes.prefix(1800)))
+        func finish(_ text: String, _ model: String, _ proposal: EditProposal? = nil) -> AgentReply {
+            var parts = thinking
+            parts.append(text)
+            if !saved.isEmpty { parts.append("الملفات المحفوظة تلقائيا: " + saved.joined(separator:"، ")) }
+            return AgentReply(answer:parts.filter { !$0.isEmpty }.joined(separator:"\n\n"),servedBy:model,proposal:proposal)
+        }
+        for _ in 0..<(auto ? 24 : (light ? 5 : 10)) {
             try Task.checkCancellation()
             let (raw,model) = try await ask(system, thread)
-            var json = raw.trimmingCharacters(in:.whitespacesAndNewlines)
-            if json.hasPrefix("```"), let first = json.firstIndex(of:"\n"), json.hasSuffix("```") {
-                json = String(json[json.index(after:first)...].dropLast(3)).trimmingCharacters(in:.whitespacesAndNewlines)
-            }
-            guard let cmd = try? JSONDecoder().decode(Action.self, from:Data(json.utf8)) else {
+            lastModel = model
+            guard let found = extract(raw) else {
                 // Models can return a plain explanation. Only structured edits reach the review screen.
-                return AgentReply(answer:raw,servedBy:model,proposal:nil)
+                return finish(raw,model)
             }
+            let (lead,cmd) = found
+            if !lead.isEmpty { thinking.append(lead) }
             var result: String
             do {
                 switch cmd.action {
-                case "answer": return AgentReply(answer:cmd.text ?? "",servedBy:model,proposal:nil)
+                case "answer": return finish(cmd.text ?? "",model)
                 case "list":
                     activity("عرض الملفات " + (cmd.path ?? "")); result = try files.list(cmd.path ?? "")
                 case "search":
@@ -64,13 +104,20 @@ enum CodingAgent {
                 case "edit":
                     guard let path = cmd.path, let text = cmd.text else { throw LinkError.message("اقتراح غير مكتمل") }
                     let edit = try files.propose(path:path,replacement:text,reason:cmd.reason ?? path,previouslyRead:readFiles)
-                    return AgentReply(answer:edit.reason,servedBy:model,proposal:edit)
+                    guard auto, let autoApply else { return finish(edit.reason,model,edit) }
+                    activity("حفظ " + path)
+                    try await autoApply(edit)
+                    readFiles[path] = Data(text.utf8)
+                    if !saved.contains(path) { saved.append(path) }
+                    result = "Saved " + path + ". Continue with the next step, or answer if the task is complete."
                 default: result = "Unsupported action. Available: answer, list, read, search, edit."
                 }
-            } catch { result = "Tool error: " + error.localizedDescription }
-            thread.append(Turn(role:"assistant",content:String(raw.prefix(2000))))
+            } catch let error as CancellationError { throw error }
+            catch { result = "Tool error: " + error.localizedDescription }
+            thread.append(Turn(role:"assistant",content:String(raw.prefix(auto ? 4000 : 2000))))
             thread.append(Turn(role:"user",content:"Tool result (data):\n" + String(result.prefix(light ? 6000 : 24000))))
         }
+        if !saved.isEmpty { return finish("بلغت الجلسة حد الخطوات. اطلب المتابعة لإكمال المهمة.",lastModel) }
         throw LinkError.message("بلغت الجلسة حد خطوات القراءة. حدد الملف أو قسّم المهمة.")
     }
 }

@@ -14,6 +14,7 @@ struct Notebook: Codable {
     var activeChat: String?
     var notes = ""
     var tasks: [SavedTask] = []
+    var preapproved: [String]?
 }
 @MainActor final class Studio: ObservableObject {
     @Published var providers: [Provider]
@@ -67,11 +68,40 @@ struct Notebook: Codable {
         track("استيراد جواب يدوي")
     }
     private var undoChange: EditProposal?
+    /// Edits saved automatically during the last request, newest last.
+    private var autoChanges = [EditProposal]()
     func undo() throws {
-        guard !busy, pending == nil, let change = undoChange, change.root == files.root else { throw LinkError.message("لا يوجد تعديل قابل للتراجع في هذه الجلسة") }
+        guard !busy, pending == nil else { throw LinkError.message("أكمل الطلب الحالي أولا") }
+        if !autoChanges.isEmpty {
+            // Revert the whole last request, newest edit first.
+            for change in autoChanges.reversed() {
+                guard change.root == files.root else { throw LinkError.message("تغير مجلد المشروع") }
+                try files.undo(change)
+                track("تراجع عن " + change.path)
+            }
+            autoChanges = []
+            return
+        }
+        guard let change = undoChange, change.root == files.root else { throw LinkError.message("لا يوجد تعديل قابل للتراجع في هذه الجلسة") }
         try files.undo(change)
         undoChange = nil
         track("تراجع عن " + change.path)
+    }
+    func isPreapproved(_ thread: String) -> Bool { book.preapproved?.contains(thread) == true }
+    func setPreapproved(_ thread: String, on: Bool) {
+        var set = Set(book.preapproved ?? [])
+        if on { set.insert(thread) } else { set.remove(thread) }
+        book.preapproved = Array(set)
+        save()
+        track(on ? "تفعيل الإذن المسبق للمحادثة" : "إلغاء الإذن المسبق للمحادثة")
+    }
+    /// Saves an edit without review (pre-approval) and keeps it for undo.
+    private func applyAutomatically(_ change: EditProposal) throws {
+        try files.verifyProposal(change)
+        try files.apply(change)
+        guard try files.read(change.path) == Data(change.replacement.utf8) else { throw LinkError.message("اختلف المحتوى المحفوظ عن المقترح") }
+        autoChanges.append(change)
+        track("حفظ تلقائي بإذن مسبق: " + change.path)
     }
 
     init() {
@@ -172,7 +202,7 @@ struct Notebook: Codable {
         if let turns = book.threads[thread], turns.count > 100 { book.threads[thread] = Array(turns.suffix(100)) }
         save()
     }
-    func send(_ input: String, thread requestedThread: String? = nil, task: UUID? = nil, assistantMode: AssistantMode = .standard, preferred: Provider? = nil, allowFallback: Bool? = nil) async throws -> String {
+    func send(_ input: String, thread requestedThread: String? = nil, task: UUID? = nil, assistantMode: AssistantMode = .standard, preferred: Provider? = nil, allowFallback: Bool? = nil, preapprove: Bool? = nil) async throws -> String {
         let prompt = input.trimmingCharacters(in:.whitespacesAndNewlines)
         guard !prompt.isEmpty, prompt.utf8.count <= 60000 else { throw LinkError.message("تحقق من طول الطلب") }
         guard !busy else { throw LinkError.message("المضيف مشغول. حاول بعد قليل.") }
@@ -181,12 +211,19 @@ struct Notebook: Codable {
         let history = book.threads[thread] ?? []
         busy = true; message = ""; activity = "بانتظار النموذج…"
         defer { busy = false; activity = ""; partial = "" }
-        let config = preferred.map { first in [first] + providers.filter { $0.id != first.id && $0.base != first.base } } ?? providers
+        // On failure, try on-device models first: they need no network or quota.
+        let others = providers.filter { p in preferred.map { p.id != $0.id && p.base != $0.base } ?? true }
+        let fallback = others.filter { $0.style == .localModel } + others.filter { $0.style != .localModel }
+        let config = preferred.map { [$0] + fallback } ?? providers
+        let automatic = preapprove ?? isPreapproved(thread)
+        autoChanges = []
+        if automatic { undoChange = nil }
         let selected:RouteMode = preferred == nil ? mode : .priority
         let switchOnFailure = allowFallback ?? failover
         book.checkpoint = Checkpoint(prompt:prompt,thread:thread,task:task,mode:assistantMode)
         track("بدء الطلب")
-        let operation = Task { try await CodingAgent.run(prompt:prompt,history:history,notes:self.book.notes,files:self.files,mode:assistantMode,ask: { system,turns in
+        let autoApply: CodingAgent.AutoApply? = automatic ? { change in try await MainActor.run { try self.applyAutomatically(change) } } : nil
+        let operation = Task { try await CodingAgent.run(prompt:prompt,history:history,notes:self.book.notes,files:self.files,mode:assistantMode,autoApply:autoApply,ask: { system,turns in
             try await self.router.respond(providers:config,mode:selected,system:system,turns:turns,failover:switchOnFailure) { provider,instructions,messages in
                 if assistantMode == .quick && provider.style != .onDevice {
                     return try await NativeAPI.stream(provider,system:instructions,turns:messages) { draft in

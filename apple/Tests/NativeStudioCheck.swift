@@ -54,7 +54,30 @@ func verify(_ value: Bool,_ message: String) throws { if !value { throw Check.fa
         try verify(!FileManager.default.fileExists(atPath:root.appendingPathComponent(new.path).path),"undo creation")
         try workspace.undo(edit)
         try verify(try workspace.read(edit.path) == edit.original,"undo edit")
-        let invalid = try workspace.propose(path:"config.json",replacement:"{bad",reason:"check",previouslyRead:[:])
+        // Reasoning models put their thinking first and the action last; with
+        // pre-approval the agent saves each file and keeps going.
+        var steps = 0
+        var autoSaved = [String]()
+        let reasoning = try await CodingAgent.run(prompt:"Make a game",history:[],notes:"",files:workspace,autoApply:{ change in
+            try workspace.apply(change); autoSaved.append(change.path)
+        },ask:{ system,turns in
+            steps += 1
+            try verify(system.contains("Pre-approval is on"),"pre-approval prompt")
+            switch steps {
+            case 1: return ("User wants a game. Need to create the file.\n```json\n" + #"{"action":"edit","path":"game.html","text":"<html>{x}</html>","reason":"game"}"# + "\n```","fixture")
+            case 2:
+                try verify(turns.last!.content.contains("Saved game.html"),"saved result")
+                return ("<think>check</think>" + #"{"action":"answer","text":"done"}"#,"fixture")
+            default: throw Check.failed("too many steps")
+            }
+        },activity:{_ in})
+        try verify(autoSaved == ["game.html"] && reasoning.proposal == nil,"auto-applied without review")
+        try verify(try workspace.read("game.html") == Data("<html>{x}</html>".utf8),"auto-saved content")
+        try verify(reasoning.answer.contains("User wants a game") && reasoning.answer.contains("done") && reasoning.answer.contains("game.html"),"thinking stays visible: " + reasoning.answer)
+        let plain = try await CodingAgent.run(prompt:"hi",history:[],notes:"",files:workspace,ask:{ _,_ in
+            ("Thinking first. " + #"{"action":"answer","text":"hello"}"#,"fixture") },activity:{_ in})
+        try verify(plain.answer.hasSuffix("hello") && plain.answer.contains("Thinking first."),"extract action after text")
+                let invalid = try workspace.propose(path:"config.json",replacement:"{bad",reason:"check",previouslyRead:[:])
         var invalidRejected = false
         do { try workspace.verifyProposal(invalid) } catch { invalidRejected = true }
         try verify(invalidRejected,"invalid JSON")

@@ -265,9 +265,18 @@ private struct OriginalPage: UIViewRepresentable {
                 else if let p = studio.providers.first(where: { $0.enabled && $0.id.uuidString == gateway }) { chosen = p }
                 else { throw LinkError.message("اختر بوابة من القائمة") }
                 let mode:AssistantMode = data["quick"] as? Bool == true ? .quick : (data["light"] as? Bool == true ? .light : .standard)
-                let answer=try await studio.send(question,thread:"ui-\(id)",assistantMode:mode,preferred:chosen,allowFallback:data["failover"] as? Bool ?? false)
+                let preapprove = data["preapprove"] as? Bool ?? studio.isPreapproved("ui-\(id)")
+                if preapprove != studio.isPreapproved("ui-\(id)") { studio.setPreapproved("ui-\(id)",on:preapprove) }
+                let answer=try await studio.send(question,thread:"ui-\(id)",assistantMode:mode,preferred:chosen,allowFallback:data["failover"] as? Bool ?? false,preapprove:preapprove)
                 if studio.pending != nil { open(.workspace) }
                 return ["answer":answer,"id":id] as [String:Any]
+            case "/api/preapprove":
+                // Pre-approval: edits in this conversation are saved without the review screen.
+                guard let id = data["conversation_id"] as? Int else { return ["ok":true,"answered":0] as [String:Any] }
+                studio.setPreapproved("ui-\(id)",on:data["on"] as? Bool ?? false)
+                var answered = 0
+                if data["on"] as? Bool == true, studio.pending != nil { try studio.review(apply:true); answered = 1 }
+                return ["ok":true,"answered":answered] as [String:Any]
             case "/api/stop": studio.stopRequest(); return ["ok":true]
             case "/api/shutdown": studio.stopRequest(); host.stop(); for pair in pairs where service.desired[pair.1]==true { service.set(pair.1,enabled:false) }; return ["ok":true]
             case "/api/memory": studio.setNotes(studio.book.notes+"\n"+(data["text"] as? String ?? "")); return ["ok":true]
@@ -302,7 +311,7 @@ private struct OriginalPage: UIViewRepresentable {
                         return ["chars":report.count,"text":report,"path":"Allinone","name":"report.txt"] as [String:Any]
                     }
                     let messages=(studio.book.threads[key] ?? []).map { ["role":$0.role,"display":$0.content,"sent":$0.content] }
-                    return ["conversation":["id":id,"running":false] as [String:Any],"messages":messages] as [String:Any]
+                    return ["conversation":["id":id,"running":false,"preapproved":studio.isPreapproved(key)] as [String:Any],"messages":messages] as [String:Any]
                 }
                 if path.hasPrefix("/api/bridge/") { open(.sessions) }
                 throw LinkError.message("هذه العملية غير متاحة في نسخة الجهاز")

@@ -92,7 +92,11 @@ enum NativeAPI {
         defer { session.invalidateAndCancel() }
         let (bytes,response) = try await session.bytes(for:req)
         guard let http = response as? HTTPURLResponse else { throw LinkError.message("تعذر الاتصال بالمزود") }
-        try check(http)
+        if !(200..<300).contains(http.statusCode) {
+            var body = Data()
+            for try await byte in bytes { body.append(byte); if body.count > 65536 { break } }
+            try check(http, body:body)
+        }
         var answer = ""
         if response.mimeType != "text/event-stream" {
             var data = Data()
@@ -166,11 +170,23 @@ enum NativeAPI {
         defer { session.finishTasksAndInvalidate() }
         let (data, response) = try await session.data(for:request)
         guard let http = response as? HTTPURLResponse else { throw LinkError.message("تعذرت قراءة استجابة المزود") }
-        try check(http)
+        try check(http, body:data)
         return try decode(data)
     }
 
-    static func check(_ http: HTTPURLResponse) throws {
+    /// The provider's own explanation from an error body (OpenAI, Anthropic and gateway formats).
+    static func detail(_ body: Data?) -> String {
+        guard let body, !body.isEmpty else { return "" }
+        if let object = try? JSONSerialization.jsonObject(with:body) as? [String:Any] {
+            if let error = object["error"] as? [String:Any], let message = error["message"] as? String { return message }
+            if let message = object["error"] as? String { return message }
+            if let message = object["message"] as? String { return message }
+            if let message = object["detail"] as? String { return message }
+        }
+        return String(decoding:body.prefix(300),as:UTF8.self).trimmingCharacters(in:.whitespacesAndNewlines)
+    }
+
+    static func check(_ http: HTTPURLResponse, body: Data? = nil) throws {
         guard (200..<300).contains(http.statusCode) else {
             let header = http.value(forHTTPHeaderField:"Retry-After") ?? ""
             let formatter = DateFormatter()
@@ -180,7 +196,11 @@ enum NativeAPI {
             let retry = TimeInterval(header) ?? formatter.date(from:header)?.timeIntervalSinceNow ?? 30
             let hint = [401,403].contains(http.statusCode) ? ": المفتاح مرفوض أو غير موجود. أدخل مفتاح البوابة أو المزود من «المزودون»" :
                 http.statusCode == 404 ? ": تحقق من عنوان API واسم النموذج" : ""
-            throw UpstreamFailure(reason:"HTTP \(http.statusCode)" + hint, delay:http.statusCode == 429 ? max(1,min(3600,retry)) : 0)
+            let why = detail(body)
+            let busy = http.statusCode == 429 ? ": تجاوزت حد الاستخدام عند المزود، انتظر قليلا أو فعّل «تحويل تلقائي»" :
+                [502,503,504].contains(http.statusCode) ? ": المزود خلف البوابة لم يرد. تحقق من مفاتيح المزودين في لوحة البوابة" : ""
+            throw UpstreamFailure(reason:"HTTP \(http.statusCode)" + hint + busy + (why.isEmpty ? "" : "\nالسبب: " + String(why.prefix(400))),
+                                  delay:http.statusCode == 429 ? max(1,min(3600,retry)) : 0)
         }
     }
 
