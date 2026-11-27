@@ -1,6 +1,8 @@
 import Foundation
 import UIKit
+#if canImport(llama)
 import llama
+#endif
 
 /// What the engine has loaded, for the settings screen.
 @MainActor final class EngineState: ObservableObject {
@@ -9,6 +11,7 @@ import llama
     @Published var loadedFile = ""
 }
 
+#if canImport(llama)
 /// Runs GGUF models on the device with llama.cpp (Metal). One model stays loaded;
 /// the prompt cache is reused between turns so only new text is processed.
 final class LocalEngine {
@@ -236,3 +239,13 @@ final class LocalEngine {
     ws     ::= [ \t\n]{0,8}
     """#
 }
+#else
+/// llama.cpp ships no iOS Simulator slice; simulator test builds use this stub.
+final class LocalEngine {
+    static let shared = LocalEngine()
+    func stream(_ provider: Provider, system: String, turns: [Turn]) -> AsyncThrowingStream<String,Error> {
+        AsyncThrowingStream { $0.finish(throwing: LinkError.message("النماذج المحلية تعمل على الجهاز فقط")) }
+    }
+    func unload() {}
+}
+#endif

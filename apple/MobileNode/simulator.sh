@@ -3,6 +3,15 @@ set -euo pipefail
 device=$(xcrun simctl list devices available --json | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"];print(next(v["udid"] for k,vs in sorted(d.items(),reverse=True) if ".iOS-" in k for v in vs if v["name"].startswith("iPhone")))')
 xcrun simctl boot "$device" || xcrun simctl list devices booted | grep -F "$device"
 xcrun simctl bootstatus "$device" -b
+# llama.cpp's release XCFramework has no simulator slice: build the simulator app without it.
+python3 - <<'PY2'
+from pathlib import Path
+spec = Path('apple/project.yml').read_text()
+cut = "      - framework: Vendor/llama.xcframework\n        embed: true\n"
+assert cut in spec
+Path('apple/project-sim.yml').write_text(spec.replace(cut, ""))
+PY2
+(cd apple && xcodegen generate --spec project-sim.yml)
 xcodebuild -quiet -project apple/Allinone.xcodeproj -scheme Allinone -configuration Release -destination "id=$device" -derivedDataPath build-sim ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build
 app=build-sim/Build/Products/Release-iphonesimulator/Allinone.app
 id=app.baghdadhost.allinone
