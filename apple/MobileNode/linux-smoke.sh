@@ -30,6 +30,14 @@ for n in {1..120}; do
             curl --noproxy '*' -fLsS --max-time 30 "http://127.0.0.1:$port/" -o "$state/dashboard"
             grep -qi '<html' "$state/dashboard"
         done
+        # The supervisor must export FreeLLMAPI's unified key, and the gateway must accept it.
+        for k in {1..30}; do test -s "$state/free-api-key" && break; sleep 1; done
+        test -s "$state/free-api-key"
+        body='{"model":"auto","messages":[{"role":"user","content":"hi"}]}'
+        without=$(curl --noproxy '*' -s -o /dev/null -w '%{http_code}' --max-time 20 -H 'Content-Type: application/json' -d "$body" http://127.0.0.1:3001/v1/chat/completions)
+        with=$(curl --noproxy '*' -s -o /dev/null -w '%{http_code}' --max-time 20 -H 'Content-Type: application/json' -H "Authorization: Bearer $(cat "$state/free-api-key")" -d "$body" http://127.0.0.1:3001/v1/chat/completions)
+        echo "FreeLLMAPI without key: $without, with exported key: $with"
+        test "$without" = 401 && test "$with" != 401
         echo 'Both upstream APIs and web dashboards answered in a loopback-only network.'
         exit 0
     fi

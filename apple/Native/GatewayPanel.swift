@@ -105,6 +105,18 @@ struct GatewayManifest: Decodable {
         if state != next { state = next }
     }
     func password() -> String? { try? String(contentsOf:dir.appendingPathComponent("omni-password"),encoding:.utf8) }
+    /// FreeLLMAPI's unified key, exported by the supervisor from the gateway's database.
+    func freeKey() -> String? {
+        let value = (try? String(contentsOf:dir.appendingPathComponent("free-api-key"),encoding:.utf8))?.trimmingCharacters(in:.whitespacesAndNewlines)
+        return value?.isEmpty == false ? value : nil
+    }
+    /// Gives every FreeLLMAPI provider the gateway's current key (it changes if regenerated in the dashboard).
+    func syncFreeKey(_ studio: Studio) {
+        guard let key = freeKey() else { return }
+        for p in studio.providers where p.base == "http://127.0.0.1:3001/v1" {
+            if (try? Credentials.key(p.id)) != key { try? Credentials.save(key,p.id) }
+        }
+    }
 }
 
 private struct GatewayDashboard: UIViewRepresentable {
@@ -234,7 +246,7 @@ struct GatewayPanel: View {
                         if !service.problem.isEmpty { Text(service.problem) }
                     }
                 }
-            }.onAppear { openWhenReady() }.onChange(of:service.state) { _ in openWhenReady() }.navigationTitle("البوابات المحلية").navigationBarTitleDisplayMode(.inline)
+            }.onAppear { openWhenReady(); service.syncFreeKey(studio) }.onChange(of:service.state) { _ in openWhenReady(); service.syncFreeKey(studio) }.navigationTitle("البوابات المحلية").navigationBarTitleDisplayMode(.inline)
              .toolbar { Button(selected == nil ? "تم" : "رجوع") { if selected == nil { dismiss() } else { selected = nil } } }
         }
     }

@@ -255,6 +255,11 @@ private struct OriginalPage: UIViewRepresentable {
                         try studio.addProvider(p)
                     }
                     if let model=data["model"] as? String,!model.isEmpty {p.model=model}
+                    if pair.1 == "free" {
+                        // Wait briefly for the supervisor to export the key on first start.
+                        for _ in 0..<20 where service.freeKey() == nil { try await Task.sleep(nanoseconds:500_000_000) }
+                        service.syncFreeKey(studio)
+                    }
                     chosen=p
                 } else if gateway=="apple" { chosen = .apple }
                 else if let p = studio.providers.first(where: { $0.enabled && $0.id.uuidString == gateway }) { chosen = p }

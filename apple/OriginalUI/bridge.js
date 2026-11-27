@@ -149,5 +149,12 @@
     version.title='إعدادات الجهاز والاتصال';
     version.onclick=()=>native('/mobile/options');
     version.onkeydown=e=>{if(e.key==='Enter') version.click();};
+    // A visible entry to device settings (local models, gateways, memory, providers).
+    const settings=document.createElement('button');
+    settings.id='deviceBtn'; settings.className='btn small';
+    settings.textContent='⚙️ الإعدادات';
+    settings.title='إعدادات الجهاز: النماذج المحلية والبوابات والذاكرة والمزودون';
+    settings.onclick=()=>native('/mobile/options');
+    document.getElementById('gwPower').before(settings);
   });
 })();

@@ -182,6 +182,26 @@ async function run() {
       launch(name,port);
     }
   }
-  for(;;){await reconcile();await sleep(500);}
+  // FreeLLMAPI keeps its unified API key in its own database (as on desktop).
+  // Copy it to a file the app reads, so requests are authorised without manual setup.
+  let keyCheck=0;
+  function exportFreeKey() {
+    if(status.free!=='listening' || Date.now()<keyCheck) return;
+    keyCheck=Date.now()+5000;
+    try {
+      const {DatabaseSync}=require('node:sqlite');
+      const db=new DatabaseSync(config.free.FREEAPI_DB_PATH,{readOnly:true});
+      try {
+        const row=db.prepare("SELECT value FROM settings WHERE key = 'unified_api_key'").get();
+        const file=path.join(dir,'free-api-key');
+        const current=fs.existsSync(file)?fs.readFileSync(file,'utf8'):'';
+        if(row && row.value && String(row.value)!==current) {
+          fs.writeFileSync(file+'.tmp',String(row.value),{mode:0o600});
+          fs.renameSync(file+'.tmp',file);
+        }
+      } finally { db.close(); }
+    } catch {}
+  }
+  for(;;){await reconcile();exportFreeKey();await sleep(500);}
 }
 run().catch(error=>{status.install='error: '+error.message;save();});
