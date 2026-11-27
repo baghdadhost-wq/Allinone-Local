@@ -26,6 +26,8 @@ final class LocalEngine {
     private var cached: [llama_token] = []
     private var cancelled = false
     private(set) var contextSize = 0
+    /// Upper bound on generated tokens per reply (0 = until the context is full). Used by tests.
+    static var maxNewTokens = 0
 
     private init() {
         llama_backend_init()
@@ -261,7 +263,8 @@ final class LocalEngine {
         llama_sampler_chain_add(sampler, llama_sampler_init_dist(UInt32.random(in: 0...UInt32.max)))
         var bytes = [UInt8]()
         var piece = [CChar](repeating: 0, count: 256)
-        let limit = contextSize - tokens.count - 8
+        let room = contextSize - tokens.count - 8
+        let limit = Self.maxNewTokens > 0 ? min(room, Self.maxNewTokens) : room
         for step in 0..<limit {
             if cancelled { throw CancellationError() }
             // Slow down when the device is hot instead of letting iOS throttle or stop the app.
