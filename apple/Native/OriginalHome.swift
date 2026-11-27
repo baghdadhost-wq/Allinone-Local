@@ -44,6 +44,7 @@ struct OriginalHome: View {
                             NavigationLink("البوابات المحلية") { GatewayPanel(studio:host.studio) }
                             NavigationLink("النماذج المحلية") { ModelLibraryPanel(studio:host.studio) }
                             NavigationLink("خادم النماذج لـ Claude Code") { ModelServerPanel() }
+                            NavigationLink("GitHub للمشروع") { GitPanel(studio:host.studio) }
                             NavigationLink("الذاكرة") { MemoryPanel() }
                             NavigationLink("ملفات المشروع ومراجعة التعديلات") { Workbench(studio:host.studio,host:host) }
                         }.navigationTitle("إعدادات الجهاز").toolbar { Button("تم") { panel = nil } }

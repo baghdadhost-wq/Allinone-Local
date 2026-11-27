@@ -77,7 +77,30 @@ func verify(_ value: Bool,_ message: String) throws { if !value { throw Check.fa
         let plain = try await CodingAgent.run(prompt:"hi",history:[],notes:"",files:workspace,ask:{ _,_ in
             ("Thinking first. " + #"{"action":"answer","text":"hello"}"#,"fixture") },activity:{_ in})
         try verify(plain.answer.hasSuffix("hello") && plain.answer.contains("Thinking first."),"extract action after text")
-                let invalid = try workspace.propose(path:"config.json",replacement:"{bad",reason:"check",previouslyRead:[:])
+                // Search/replace edits and running code.
+        CodingAgent.runner = { lang, code in lang + ":" + code }
+        var rsteps = 0
+        let replaced = try await CodingAgent.run(prompt:"Set n to 5",history:[],notes:"",files:workspace,autoApply:{ change in try workspace.apply(change) },ask:{ _,turns in
+            rsteps += 1
+            switch rsteps {
+            case 1: return (#"{"action":"read","path":"main.swift"}"#,"fixture")
+            case 2: return (#"{"action":"replace","path":"main.swift","find":"n = 9","text":"n = 5","reason":"x"}"#,"fixture")
+            case 3:
+                try verify(turns.last!.content.contains("not found"),"replace reports missing text")
+                return (#"{"action":"replace","path":"main.swift","find":"n = 1","text":"n = 5","reason":"set"}"#,"fixture")
+            case 4:
+                try verify(turns.last!.content.contains("Saved main.swift"),"replace saved")
+                return (#"{"action":"run","lang":"js","text":"console.log(1)"}"#,"fixture")
+            case 5:
+                try verify(turns.last!.content.contains("js:console.log(1)"),"run output returned")
+                return (#"{"action":"answer","text":"ok"}"#,"fixture")
+            default: throw Check.failed("replace steps")
+            }
+        },activity:{_ in})
+        try verify(try workspace.read("main.swift") == Data("let n = 5\n".utf8) && replaced.answer.contains("main.swift"),"search/replace edit")
+        CodingAgent.runner = nil
+        try Data("let n = 1\n".utf8).write(to:target)
+        let invalid = try workspace.propose(path:"config.json",replacement:"{bad",reason:"check",previouslyRead:[:])
         var invalidRejected = false
         do { try workspace.verifyProposal(invalid) } catch { invalidRejected = true }
         try verify(invalidRejected,"invalid JSON")

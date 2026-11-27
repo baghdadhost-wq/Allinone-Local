@@ -228,7 +228,7 @@ final class LocalEngine {
             tokens = tokenize(format(model: model, system: system, turns: history))
         }
         guard tokens.count < contextSize - 256 else {
-            throw LinkError.message("الطلب أطول من سياق النموذج (\(contextSize) رمز). قسّم المهمة أو زد طول السياق.")
+            throw UpstreamFailure(reason:"الطلب أطول من سياق النموذج المحلي (\(contextSize) رمز). زد طول السياق أو قسّم المهمة، أو فعّل «تحويل تلقائي» ليكملها مزود بسياق أكبر (Mac المنزل أو مزود سحابي).",delay:0)
         }
         // Reuse what is already in the KV cache (system prompt, earlier turns).
         var prefix = zip(cached, tokens).prefix { $0 == $1 }.count
@@ -327,8 +327,8 @@ final class LocalEngine {
     /// fail at the format far more often than at the task itself.
     static let actionGrammar = #"""
     root   ::= "{" ws "\"action\"" ws ":" ws action ( ws "," ws field )* ws "}"
-    action ::= "\"answer\"" | "\"list\"" | "\"read\"" | "\"search\"" | "\"edit\""
-    field  ::= ( "\"path\"" | "\"text\"" | "\"reason\"" ) ws ":" ws string
+    action ::= "\"answer\"" | "\"list\"" | "\"read\"" | "\"search\"" | "\"replace\"" | "\"edit\"" | "\"run\""
+    field  ::= ( "\"path\"" | "\"text\"" | "\"reason\"" | "\"find\"" | "\"lang\"" ) ws ":" ws string
     string ::= "\"" char* "\""
     char   ::= [^"\\\x7F\x00-\x1F] | "\\" ( ["\\/bfnrt] | "u" [0-9a-fA-F]{4} )
     ws     ::= [ \t\n]{0,8}

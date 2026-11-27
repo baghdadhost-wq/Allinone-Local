@@ -141,16 +141,6 @@ jobs:
         with:
           name: Allinone-unsigned
           path: Allinone-unsigned.ipa
-      - name: Boot both upstream gateways inside the iOS app
-        run: bash apple/MobileNode/simulator.sh "$RUNNER_TEMP/mobile-assets"
-      - name: Exercise coding sessions, project writes and routing
-        run: |
-          swiftc -o /tmp/studio-check AllinoneClient.swiftpm/LocalLink.swift apple/Native/Routing.swift apple/Native/Workspace.swift apple/Native/CodingAgent.swift apple/Native/Exchange.swift apple/Tests/NativeStudioCheck.swift
-          /tmp/studio-check
-      - name: Test the native link on loopback
-        run: |
-          swiftc -o /tmp/local-link-check AllinoneClient.swiftpm/LocalLink.swift apple/Tests/LocalLinkCheck.swift
-          /tmp/local-link-check
       - name: Run the on-device engine and Claude Code server with a tiny model (macOS slice)
         run: |
           set -euo pipefail
@@ -167,6 +157,16 @@ jobs:
             apple/Native/ModelStore.swift apple/Native/LocalEngine.swift apple/Native/ServerCore.swift \
             apple/Tests/LocalEngineCheck.swift
           /tmp/engine-check /tmp/tiny.gguf
+      - name: Boot both upstream gateways inside the iOS app
+        run: bash apple/MobileNode/simulator.sh "$RUNNER_TEMP/mobile-assets"
+      - name: Exercise coding sessions, project writes and routing
+        run: |
+          swiftc -o /tmp/studio-check AllinoneClient.swiftpm/LocalLink.swift apple/Native/Routing.swift apple/Native/Workspace.swift apple/Native/CodingAgent.swift apple/Native/Exchange.swift apple/Tests/NativeStudioCheck.swift
+          /tmp/studio-check
+      - name: Test the native link on loopback
+        run: |
+          swiftc -o /tmp/local-link-check AllinoneClient.swiftpm/LocalLink.swift apple/Tests/LocalLinkCheck.swift
+          /tmp/local-link-check
 
   # A stable public download link for the newest build of main:
   # https://github.com/<owner>/<repo>/releases/download/app-latest/Allinone-unsigned.ipa

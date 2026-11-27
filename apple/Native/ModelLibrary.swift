@@ -69,7 +69,22 @@ enum HuggingFace {
     static let shared = ModelLibrary()
     @Published private(set) var installed = ModelStore.installed
     @Published var message = ""
+    @Published private(set) var speeds = (UserDefaults.standard.dictionary(forKey: "local.speeds") as? [String:String]) ?? [:]
+    @Published private(set) var measuring = ""
     func reload() { installed = ModelStore.installed }
+
+    /// Measures prompt and generation speed on this device and remembers it per model.
+    func measure(_ file: String) async {
+        guard measuring.isEmpty else { return }
+        measuring = file
+        defer { measuring = "" }
+        do {
+            let speed = try await LocalEngine.shared.benchmark(ModelStore.url(for: file))
+            let verdict = speed.generation >= 15 ? "سريع" : speed.generation >= 6 ? "مقبول للمحادثة" : "بطيء، جرّب حجما أصغر"
+            speeds[file] = String(format: "المعالجة %.0f ر/ث · التوليد %.1f ر/ث · %@", speed.prompt, speed.generation, verdict)
+            UserDefaults.standard.set(speeds, forKey: "local.speeds")
+        } catch { message = error.localizedDescription }
+    }
 
     func download(repo: String, file: HuggingFace.File) {
         guard !file.split else { message = "الملفات المقسمة إلى أجزاء غير مدعومة بعد. اختر ملفا واحدا."; return }
@@ -185,8 +200,12 @@ struct ModelLibraryPanel: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(item.file).font(.subheadline)
                         HStack { Text(ByteCountFormatter.string(fromByteCount: item.size, countStyle: .file)); FitLabel(bytes: item.size) }.font(.caption)
+                        if let speed = library.speeds[item.file] { Text(speed).font(.caption) }
                         HStack {
                             Button("استخدام في المحادثة") { library.use(item.file, studio: studio) }.buttonStyle(.borderless)
+                            Spacer()
+                            Button(library.measuring == item.file ? "جار القياس…" : "قياس السرعة") { Task { await library.measure(item.file) } }
+                                .buttonStyle(.borderless).disabled(!library.measuring.isEmpty)
                             Spacer()
                             Button("حذف", role: .destructive) { library.delete(item.file) }.buttonStyle(.borderless)
                         }
