@@ -59,14 +59,7 @@ import UIKit
 
     func clearError(_ id: String) { errors[id] = nil }
 
-    /// Marks a folder so iCloud and device backups skip it (models are many gigabytes).
-    nonisolated static func excludeFromBackup(_ folder: URL) {
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        var url = folder
-        var values = URLResourceValues()
-        values.isExcludedFromBackup = true
-        try? url.setResourceValues(values)
-    }
+    nonisolated static func excludeFromBackup(_ folder: URL) { excludeFolderFromBackup(folder) }
 }
 
 private final class Job: NSObject, URLSessionDownloadDelegate {

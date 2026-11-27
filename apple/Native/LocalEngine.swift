@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(UIKit)
 import UIKit
+#endif
 #if canImport(llama)
 import llama
 #endif
@@ -27,10 +29,93 @@ final class LocalEngine {
 
     private init() {
         llama_backend_init()
+        #if canImport(UIKit)
         NotificationCenter.default.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: nil) { [weak self] _ in
             // iOS is about to terminate memory-heavy apps: give the model back if it is idle.
             self?.queue.async { self?.unloadLocked() }
         }
+        // Keep the processed context on disk so the next launch skips re-reading long prompts.
+        NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+            var task = UIBackgroundTaskIdentifier.invalid
+            task = UIApplication.shared.beginBackgroundTask { UIApplication.shared.endBackgroundTask(task) }
+            self?.queue.async {
+                self?.saveCacheLocked()
+                DispatchQueue.main.async { UIApplication.shared.endBackgroundTask(task) }
+            }
+        }
+        #endif
+    }
+
+    /// Saves the processed context (KV cache) of the loaded model to disk.
+    func persist() { queue.sync { self.saveCacheLocked() } }
+
+    private static let cacheDir: URL = {
+        let url = ModelStore.dir.deletingLastPathComponent().appendingPathComponent("ModelCache")
+        excludeFolderFromBackup(url)
+        return url
+    }()
+    private func cacheFile(_ path: String) -> URL {
+        Self.cacheDir.appendingPathComponent((path as NSString).lastPathComponent + "-\(contextSize).state")
+    }
+    private func saveCacheLocked() {
+        guard let ctx, !loadedPath.isEmpty, cached.count > 32 else { return }
+        let file = cacheFile(loadedPath)
+        let written = cached.withUnsafeBufferPointer { llama_state_seq_save_file(ctx, file.path, 0, $0.baseAddress, $0.count) }
+        if written == 0 { try? FileManager.default.removeItem(at: file) }
+    }
+    private func restoreCacheLocked() {
+        guard let ctx else { return }
+        let file = cacheFile(loadedPath)
+        guard FileManager.default.fileExists(atPath: file.path) else { return }
+        var tokens = [llama_token](repeating: 0, count: contextSize)
+        var count = 0
+        let read = llama_state_seq_load_file(ctx, file.path, 0, &tokens, tokens.count, &count)
+        if read > 0, count > 0 { cached = Array(tokens.prefix(count)) }
+        else { llama_memory_clear(llama_get_memory(ctx), true); try? FileManager.default.removeItem(at: file) }
+    }
+
+    /// Prompt processing and generation speed in tokens per second.
+    struct Speed { let prompt: Double; let generation: Double }
+    func benchmark(_ file: URL) async throws -> Speed {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                do { continuation.resume(returning: try self.benchmarkLocked(file)) }
+                catch { continuation.resume(throwing: error) }
+            }
+        }
+    }
+    private func benchmarkLocked(_ file: URL) throws -> Speed {
+        try load(file)
+        guard let ctx, let vocab else { throw LinkError.message("النموذج غير محمّل") }
+        let memory = llama_get_memory(ctx)
+        llama_memory_clear(memory, true)
+        cached = []
+        defer { llama_memory_clear(memory, true); cached = [] }
+        var prompt = Array(tokenize(String(repeating: "The quick brown fox jumps over the lazy dog. ", count: 40)).prefix(min(512, contextSize / 2)))
+        let start = Date()
+        var index = 0
+        let batch = Int(llama_n_batch(ctx))
+        while index < prompt.count {
+            let end = min(index + batch, prompt.count)
+            var slice = Array(prompt[index..<end])
+            let rc = slice.withUnsafeMutableBufferPointer { llama_decode(ctx, llama_batch_get_one($0.baseAddress, Int32($0.count))) }
+            guard rc == 0 else { throw LinkError.message("تعذر قياس السرعة (\(rc))") }
+            index = end
+        }
+        let promptSpeed = Double(prompt.count) / max(0.001, Date().timeIntervalSince(start))
+        let sampler = llama_sampler_chain_init(llama_sampler_chain_default_params())
+        defer { llama_sampler_free(sampler) }
+        llama_sampler_chain_add(sampler, llama_sampler_init_greedy())
+        let genStart = Date()
+        var produced = 0
+        for _ in 0..<64 {
+            var token = llama_sampler_sample(sampler, ctx, -1)
+            if llama_vocab_is_eog(vocab, token) { break }
+            guard llama_decode(ctx, llama_batch_get_one(&token, 1)) == 0 else { break }
+            produced += 1
+        }
+        prompt = []
+        return Speed(prompt: promptSpeed, generation: Double(produced) / max(0.001, Date().timeIntervalSince(genStart)))
     }
 
     /// Registered as NativeAPI.local at launch.
@@ -56,6 +141,7 @@ final class LocalEngine {
     // MARK: - Engine (runs on `queue` only)
 
     private func unloadLocked() {
+        saveCacheLocked()
         if let ctx { llama_free(ctx) }
         if let model { llama_model_free(model) }
         ctx = nil; model = nil; vocab = nil; loadedPath = ""; cached = []; contextSize = 0
@@ -112,6 +198,7 @@ final class LocalEngine {
         ctx = context
         loadedPath = file.path
         contextSize = Int(llama_n_ctx(context))
+        restoreCacheLocked()
         let name = file.deletingPathExtension().lastPathComponent
         let n = contextSize
         let loadedFile = file.lastPathComponent
@@ -177,6 +264,14 @@ final class LocalEngine {
         let limit = contextSize - tokens.count - 8
         for step in 0..<limit {
             if cancelled { throw CancellationError() }
+            // Slow down when the device is hot instead of letting iOS throttle or stop the app.
+            switch ProcessInfo.processInfo.thermalState {
+            case .critical:
+                bytes.append(contentsOf: Array("\n\n[توقف التوليد مؤقتا: الجهاز ساخن جدا]".utf8))
+                emit(String(decoding: bytes, as: UTF8.self)); return
+            case .serious: Thread.sleep(forTimeInterval: 0.03)
+            default: break
+            }
             var token = llama_sampler_sample(sampler, ctx, -1)
             if llama_vocab_is_eog(vocab, token) { break }
             var n = llama_token_to_piece(vocab, token, &piece, Int32(piece.count), 0, false)
@@ -247,5 +342,8 @@ final class LocalEngine {
         AsyncThrowingStream { $0.finish(throwing: LinkError.message("النماذج المحلية تعمل على الجهاز فقط")) }
     }
     func unload() {}
+    func persist() {}
+    struct Speed { let prompt: Double; let generation: Double }
+    func benchmark(_ file: URL) async throws -> Speed { throw LinkError.message("النماذج المحلية تعمل على الجهاز فقط") }
 }
 #endif
