@@ -7,6 +7,11 @@ xcodebuild -quiet -project apple/Allinone.xcodeproj -scheme Allinone -configurat
 app=build-sim/Build/Products/Release-iphonesimulator/Allinone.app
 id=app.baghdadhost.allinone
 xcrun simctl install "$device" "$app"
+# Seed the gateway archives the app would otherwise download from the release.
+assets=${1:?gateway archive directory required}
+data=$(xcrun simctl get_app_container "$device" "$id" data)
+mkdir -p "$data/Library/Application Support/MobileGateways/downloads"
+cp "$assets"/omni.dat "$assets"/free.dat "$data/Library/Application Support/MobileGateways/downloads/"
 python3 - <<'PYTHON' &
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json

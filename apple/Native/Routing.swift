@@ -4,7 +4,7 @@ import Security
 
 enum RouteMode: String, Codable, CaseIterable { case priority, freePool }
 
-enum APIStyle: String, Codable, CaseIterable { case openAI, anthropic, gateway, onDevice }
+enum APIStyle: String, Codable, CaseIterable { case openAI, anthropic, gateway, onDevice, localModel }
 
 struct Provider: Identifiable, Codable, Equatable {
     var id = UUID()
@@ -69,8 +69,21 @@ private final class KeepOrigin: NSObject, URLSessionTaskDelegate {
 }
 
 enum NativeAPI {
+    /// Runs a downloaded GGUF model on the device (set by the app at launch).
+    /// The stream yields the whole answer so far after each new piece.
+    static var local: ((Provider,String,[Turn]) -> AsyncThrowingStream<String,Error>)?
+
+    static func localModel(_ provider: Provider, system: String, turns: [Turn], update: (String) -> Void) async throws -> String {
+        guard let local else { throw LinkError.message("محرك النماذج المحلية غير متاح في هذه النسخة") }
+        var answer = ""
+        for try await text in local(provider,system,turns) { answer = text; update(text) }
+        guard !answer.isEmpty else { throw LinkError.message("لم يرجع النموذج المحلي نصا") }
+        return answer
+    }
+
     @MainActor static func stream(_ provider: Provider, system: String, turns: [Turn], update: (String) -> Void) async throws -> String {
         update("")
+        if provider.style == .localModel { return try await localModel(provider,system:system,turns:turns,update:update) }
         var req = try request(provider,key:Credentials.key(provider.id),system:system,turns:turns)
         var body = try JSONSerialization.jsonObject(with:req.httpBody!) as! [String:Any]
         body["stream"] = true
@@ -137,6 +150,7 @@ enum NativeAPI {
     }
 
     static func reply(_ provider: Provider, system: String, turns: [Turn]) async throws -> String {
+        if provider.style == .localModel { return try await localModel(provider,system:system,turns:turns) { _ in } }
         if provider.style == .onDevice {
             if #available(iOS 26, macOS 26, *) {
                 guard SystemLanguageModel.default.availability == .available else {

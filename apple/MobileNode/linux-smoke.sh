@@ -17,6 +17,8 @@ state=$(mktemp -d)
 trap 'if [[ -n ${pid:-} ]]; then kill "$pid" 2>/dev/null || true; fi; rm -rf "$state"' EXIT
 cp "$scripts"/{supervisor,gateway-worker,mobile-sharp}.cjs "$assets/"
 echo '{"free":true,"omni":true}' > "$state/desired.json"
+# The app downloads these from the release; here they are placed directly.
+mkdir -p "$state/downloads" && cp "$assets"/omni.dat "$assets"/free.dat "$state/downloads/"
 node "$assets/supervisor.cjs" "$state" "$assets" > "$state/runtime.log" 2>&1 &
 pid=$!
 node --version

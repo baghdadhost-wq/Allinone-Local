@@ -42,6 +42,8 @@ struct OriginalHome: View {
                             NavigationLink("المزودون وعنوان المضيف") { SettingsPanel(studio:host.studio,host:host) }
                             NavigationLink("اتصال بمضيف آخر") { Chat() }
                             NavigationLink("البوابات المحلية") { GatewayPanel(studio:host.studio) }
+                            NavigationLink("النماذج المحلية") { ModelLibraryPanel(studio:host.studio) }
+                            NavigationLink("الذاكرة") { MemoryPanel() }
                             NavigationLink("ملفات المشروع ومراجعة التعديلات") { Workbench(studio:host.studio,host:host) }
                         }.navigationTitle("إعدادات الجهاز").toolbar { Button("تم") { panel = nil } }
                     }
@@ -156,28 +158,36 @@ private struct OriginalPage: UIViewRepresentable {
             }
         }
         #endif
-        /// Waits for the first-run unpack (can take minutes) and restarts a crashed gateway once.
+        /// Downloads and unpacks the gateway on first use, then waits for it; restarts a crash once.
         func waitForGateway(_ worker:String,name:String) async throws {
             let service = MobileGateways.shared
+            let downloads = Downloads.shared
             if service.desired[worker] != true { service.set(worker,enabled:true) }
-            else if service.failure(worker) != nil { service.restart(service.state["install"]?.hasPrefix("error:") == true ? "install" : worker) }
+            else if service.failure(worker) != nil { service.restart(worker) }
+            else { service.download(worker) }
             var restarted = false
-            let started = Date()
+            var started = Date()
             while true {
                 try Task.checkCancellation()
                 service.refresh()
                 if service.state[worker] == "listening" { return }
-                let installing = (service.state["install"] ?? "installing") == "installing"
-                studio.activity = installing ? "تجهيز " + name + " لأول تشغيل… قد يستغرق بضع دقائق" : "بدء " + name + "…"
+                let job = downloads.active[MobileGateways.downloadID(worker)]
+                if let job {
+                    // Downloads have no deadline: they can take long on a slow connection.
+                    started = Date()
+                    studio.activity = "تنزيل " + name + " " + String(Int(job.fraction * 100)) + "٪ (" + service.size(worker) + ")"
+                } else {
+                    studio.activity = service.preparing(worker) ? "تجهيز " + name + " لأول تشغيل… قد يستغرق بضع دقائق" : "بدء " + name + "…"
+                }
                 if let failure = service.failure(worker) {
                     guard !restarted else {
                         studio.activity = ""
-                        throw LinkError.message(name + " لم تعمل: " + failure.dropFirst(6).trimmingCharacters(in:.whitespaces) + ". افتح البوابات المحلية لإعادة تشغيلها.")
+                        throw LinkError.message(name + " لم تعمل: " + failure.dropFirst(6).trimmingCharacters(in:.whitespaces) + ". افتح البوابات المحلية لإعادة المحاولة.")
                     }
                     restarted = true
-                    service.restart(service.state["install"]?.hasPrefix("error:") == true ? "install" : worker)
+                    service.restart(worker)
                 }
-                if Date().timeIntervalSince(started) > (installing ? 900 : 180) {
+                if Date().timeIntervalSince(started) > (service.preparing(worker) ? 900 : 180) {
                     studio.activity = ""
                     throw LinkError.message(name + " لم تجهز بعد. انتظر حتى تظهر «تعمل محليا» في البوابات المحلية ثم أعد الإرسال.")
                 }
@@ -211,7 +221,7 @@ private struct OriginalPage: UIViewRepresentable {
                 if path == "/api/gateway" {
                     let start = data["action"] as? String == "start"
                     if start, service.desired[pair.1] == true, service.failure(pair.1) != nil {
-                        service.restart(service.state["install"]?.hasPrefix("error:") == true ? "install" : pair.1)
+                        service.restart(pair.1)
                     } else { service.set(pair.1,enabled:start) }
                 }
                 else {

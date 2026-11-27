@@ -6,8 +6,11 @@ const crypto = require('node:crypto');
 const {Worker} = require('node:worker_threads');
 const dir = process.argv[2];
 const bundle = process.argv[3];
-const revision = 'omni-3.8.54_free-0.16.39-1';
-const root = path.join(dir, revision);
+// gateways.json (bundled in the app) pins each downloadable archive by SHA-256.
+const manifest = JSON.parse(fs.readFileSync(path.join(bundle,'gateways.json'),'utf8'));
+const rootOf = name => path.join(dir, manifest.assets[name].revision);
+const readyFile = name => path.join(rootOf(name), '.ready');
+const archiveOf = name => path.join(dir, 'downloads', manifest.assets[name].file);
 const status = {};
 const workers = new Map();
 const ports = {omni:20128, free:3001};
@@ -16,12 +19,16 @@ function save() {
   fs.writeFileSync(file+'.tmp',JSON.stringify(status));
   fs.renameSync(file+'.tmp',file);
 }
-async function unpack() {
-  if(fs.existsSync(path.join(root,'.ready'))) return;
+async function unpack(name) {
+  const root = rootOf(name);
+  if(fs.existsSync(readyFile(name))) return;
   const temp=root+'.install';
   fs.rmSync(temp,{force:true,recursive:true});
   fs.mkdirSync(temp,{recursive:true});
-  const input=fs.createReadStream(path.join(bundle,'gateways.dat')).pipe(zlib.createGunzip());
+  const hash=crypto.createHash('sha256');
+  const raw=fs.createReadStream(archiveOf(name));
+  raw.on('data',chunk=>hash.update(chunk));
+  const input=raw.pipe(zlib.createGunzip());
   const chunks=input[Symbol.asyncIterator]();
   let buffer=Buffer.alloc(0);
   async function fill() {
@@ -47,7 +54,8 @@ async function unpack() {
       if(length===0 && size===0) break;
       if(length<1 || length>4096) throw Error('Invalid archive path');
       const rel=(await read(length)).toString();
-      if(rel.split('/').some(p=>!p || p==='.' || p==='..')) throw Error('Invalid archive entry');
+      const parts=rel.split('/');
+      if(parts[0]!==name || parts.some(p=>!p || p==='.' || p==='..')) throw Error('Invalid archive entry');
       const dest=path.join(temp,rel);
       fs.mkdirSync(path.dirname(dest),{recursive:true});
       const fd=fs.openSync(dest,'wx',0o600);
@@ -62,9 +70,27 @@ async function unpack() {
       } finally { fs.closeSync(fd); }
     }
     if(buffer.length || !(await chunks.next()).done) throw Error('Unexpected archive data');
+    await new Promise(resolve=>raw.closed ? resolve() : raw.once('close',resolve));
+    if(hash.digest('hex')!==manifest.assets[name].sha256) throw Error('Archive checksum mismatch');
     fs.writeFileSync(path.join(temp,'.ready'),'1');
+    fs.rmSync(root,{force:true,recursive:true});
     fs.renameSync(temp,root);
-  } finally { input.destroy(); }
+    // The unpacked copy is all that is needed; free the space of the download.
+    fs.rmSync(archiveOf(name),{force:true});
+  } catch(error) {
+    fs.rmSync(temp,{force:true,recursive:true});
+    // A corrupt download must be fetched again.
+    if(/checksum|Incomplete|Invalid|Unexpected|incorrect header|unexpected end/i.test(error.message)) fs.rmSync(archiveOf(name),{force:true});
+    throw error;
+  } finally { input.destroy(); raw.destroy(); }
+}
+// Remove unpacked copies of older gateway releases.
+function prune() {
+  const keep=new Set(Object.values(manifest.assets).map(a=>a.revision));
+  for(const entry of fs.readdirSync(dir,{withFileTypes:true})) {
+    if(entry.isDirectory() && /^(omni|free)-/.test(entry.name) && !keep.has(entry.name.replace(/\.install$/,'')))
+      fs.rmSync(path.join(dir,entry.name),{force:true,recursive:true});
+  }
 }
 function secret(name) {
   const file=path.join(dir,name);
@@ -79,20 +105,9 @@ function takeRequest(name) {
   return true;
 }
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-async function install() {
-  for(;;) {
-    status.install='installing'; save();
-    try { await unpack(); return; }
-    catch(error) {
-      status.install='error: '+error.message; save();
-      while(!takeRequest('install')) await sleep(1000);
-    }
-  }
-}
 async function run() {
-  fs.mkdirSync(dir,{recursive:true});
-  await install();
-  process.chdir(path.join(root,'omni'));
+  fs.mkdirSync(path.join(dir,'downloads'),{recursive:true});
+  try { prune(); } catch {}
   status.install='ready'; save();
   const env={...process.env,NODE_ENV:'production',NEXT_TELEMETRY_DISABLED:'1',
     ARENA_ELO_SYNC_ENABLED:'false',MODELS_DEV_SYNC_ENABLED:'false',PRICING_SYNC_ENABLED:'false',
@@ -101,8 +116,18 @@ async function run() {
   fs.mkdirSync(data,{recursive:true});
   const config={
     omni:{DATA_DIR:path.join(data,'omni'),JWT_SECRET:secret('jwt'),INITIAL_PASSWORD:secret('omni-password'),STORAGE_ENCRYPTION_KEY:secret('omni-key')},
-    free:{FREEAPI_DB_PATH:path.join(data,'free','gateway.db'),ENCRYPTION_KEY:secret('free-key'),CLIENT_DIST:path.join(root,'free/client/dist'),ALLOWED_HOSTS:'127.0.0.1'}
+    free:{FREEAPI_DB_PATH:path.join(data,'free','gateway.db'),ENCRYPTION_KEY:secret('free-key'),CLIENT_DIST:path.join(rootOf('free'),'free/client/dist'),ALLOWED_HOSTS:'127.0.0.1'}
   };
+  const installing=new Set();
+  // Unpack a downloaded archive in the background; reconcile() launches it when ready.
+  function install(name) {
+    if(installing.has(name)) return;
+    installing.add(name);
+    status[name]='installing'; save();
+    unpack(name).then(()=>{ status[name]='ready'; save(); },
+      error=>{ status[name]='error: '+error.message; save(); failures[name]=99; })
+      .finally(()=>installing.delete(name));
+  }
   const failures={}, retryAt={};
   function readDesired() {
     try { return JSON.parse(fs.readFileSync(path.join(dir,'desired.json'),'utf8')); }
@@ -110,7 +135,9 @@ async function run() {
   }
   function launch(name,port) {
     status[name]='starting'; save();
-    const worker=new Worker(path.join(bundle,'gateway-worker.cjs'),{workerData:{name,root,port},env:{...env,...config[name],PORT:String(port)}});
+    // Next's standalone server expects its own folder as the working directory.
+    if(name==='omni') process.chdir(path.join(rootOf('omni'),'omni'));
+    const worker=new Worker(path.join(bundle,'gateway-worker.cjs'),{workerData:{name,root:rootOf(name),port},env:{...env,...config[name],PORT:String(port)}});
     workers.set(name,worker);
     const failed=reason=>{
       if(workers.get(name)!==worker) return;
@@ -140,6 +167,12 @@ async function run() {
         failures[name]=0; delete retryAt[name];
         if(status[name]!=='stopped'){status[name]='stopped'; save();}
         continue;
+      }
+      if(!current && !fs.existsSync(readyFile(name))) {
+        if(installing.has(name)) continue;
+        if(!fs.existsSync(archiveOf(name))) { if(status[name]!=='missing'){status[name]='missing'; save();} continue; }
+        if(status[name]?.startsWith('error:') && !forced) continue;
+        install(name); continue;
       }
       if(current && !forced) continue;
       if(current){workers.delete(name); await current.terminate();}

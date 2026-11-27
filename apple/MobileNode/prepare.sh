@@ -48,4 +48,23 @@ for(const [dest,src] of [['payload/free','free/server/package.json'],['payload/o
 JS
 (cd payload/omni && npm install --omit=optional --ignore-scripts --legacy-peer-deps --no-audit --no-fund)
 (cd payload/free && npm install --omit=optional --ignore-scripts --no-audit --no-fund)
-python3 "$here/pack.py" payload "$out/gateways.dat"
+# One archive per gateway. The app downloads them from a GitHub release on demand,
+# so the IPA stays small. gateways.json (bundled in the app) pins their SHA-256.
+python3 "$here/pack.py" payload/omni "$out/omni.dat" omni
+python3 "$here/pack.py" payload/free "$out/free.dat" free
+REPO="${GITHUB_REPOSITORY:-baghdadhost-wq/Allinone-Local}" python3 - "$out" <<'PY'
+import hashlib, json, os, sys
+from pathlib import Path
+out = Path(sys.argv[1])
+versions = {"omni": "3.8.54", "free": "0.16.39"}
+assets = {}
+for name, version in versions.items():
+    data = (out / f"{name}.dat").read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    assets[name] = {"file": f"{name}.dat", "size": len(data), "sha256": digest,
+                    "version": version, "revision": f"{name}-{version}-{digest[:10]}"}
+tag = "gateways-" + hashlib.sha256("".join(a["sha256"] for a in assets.values()).encode()).hexdigest()[:12]
+manifest = {"tag": tag, "base": f"https://github.com/{os.environ['REPO']}/releases/download/{tag}/", "assets": assets}
+(out / "gateways.json").write_text(json.dumps(manifest, indent=1))
+print(json.dumps(manifest, indent=1))
+PY

@@ -28,16 +28,49 @@ jobs:
       - uses: actions/cache@v4
         id: gateway-cache
         with:
-          path: ${{ runner.temp }}/mobile-assets/gateways.dat
-          key: mobile-gateways-v1-${{ hashFiles('apple/MobileNode/prepare.sh', 'apple/MobileNode/pack.py') }}
+          path: ${{ runner.temp }}/mobile-assets
+          key: mobile-gateways-v2-${{ hashFiles('apple/MobileNode/prepare.sh', 'apple/MobileNode/pack.py') }}
       - name: Build original gateway packages for the embedded JS runtime
         if: steps.gateway-cache.outputs.cache-hit != 'true'
         run: bash apple/MobileNode/prepare.sh "$RUNNER_TEMP/mobile-assets"
+      - name: Show archive sizes
+        run: ls -la "$RUNNER_TEMP/mobile-assets" && cat "$RUNNER_TEMP/mobile-assets/gateways.json"
       - uses: actions/upload-artifact@v4
         with:
           name: mobile-gateway-resources
-          path: ${{ runner.temp }}/mobile-assets/gateways.dat
+          path: |
+            ${{ runner.temp }}/mobile-assets/omni.dat
+            ${{ runner.temp }}/mobile-assets/free.dat
+            ${{ runner.temp }}/mobile-assets/gateways.json
           retention-days: 1
+  # The app downloads the gateways from this release after installation, so they
+  # are not inside the IPA. The tag is derived from the archives' SHA-256.
+  publish-gateways:
+    needs: gateway-check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: mobile-gateway-resources
+          path: assets
+      - name: Upload gateway archives to a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag=$(python3 -c 'import json;print(json.load(open("assets/gateways.json"))["tag"])')
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --prerelease --title "Gateway files $tag" \
+              --notes "OmniRoute and FreeLLMAPI archives downloaded by the app on demand. Checksums are pinned in gateways.json inside the IPA."
+          fi
+          have=$(gh release view "$tag" --json assets -q '.assets[].name')
+          for f in omni.dat free.dat gateways.json; do
+            grep -qx "$f" <<<"$have" || gh release upload "$tag" "assets/$f"
+          done
+          gh release view "$tag" --json assets -q '.assets[] | "\(.name) \(.size)"'
   gateway-check:
     needs: assets
     runs-on: ubuntu-latest
@@ -50,7 +83,7 @@ jobs:
         with:
           name: mobile-gateway-resources
           path: ${{ runner.temp }}/mobile-assets
-      - name: Test upstream APIs and dashboards without Internet access
+      - name: Test downloaded archives, APIs and dashboards without Internet access
         run: sudo env PATH="$PATH" unshare --net bash apple/MobileNode/linux-smoke.sh "$RUNNER_TEMP/mobile-assets"
   build:
     needs: assets
@@ -60,7 +93,25 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: mobile-gateway-resources
-          path: apple/Vendor
+          path: ${{ runner.temp }}/mobile-assets
+      - name: Bundle only the gateway manifest (archives are downloaded by the app)
+        run: mkdir -p apple/Vendor && cp "$RUNNER_TEMP/mobile-assets/gateways.json" apple/Vendor/
+      - name: Install llama.cpp framework for on-device models
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LLAMA_TAG: b12380
+        run: |
+          set -euo pipefail
+          asset="llama-$LLAMA_TAG-xcframework.zip"
+          curl -fLsS --retry 3 "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_TAG/$asset" -o /tmp/llama.zip
+          expected=$(gh api "repos/ggml-org/llama.cpp/releases/tags/$LLAMA_TAG" --jq ".assets[] | select(.name==\"$asset\") | .digest" || true)
+          actual="sha256:$(shasum -a 256 /tmp/llama.zip | cut -d' ' -f1)"
+          echo "expected=$expected actual=$actual"
+          if [ -n "$expected" ] && [ "$expected" != "null" ]; then test "$expected" = "$actual"; fi
+          unzip -q /tmp/llama.zip -d /tmp/llama
+          cp -R "$(find /tmp/llama -type d -name llama.xcframework -print -quit)" apple/Vendor/
+          ls apple/Vendor/llama.xcframework
+          file apple/Vendor/llama.xcframework/ios-arm64/llama.framework/llama || true
       - name: Install verified NodeMobile framework for device and simulator
         run: |
           cd apple/Vendor
@@ -79,13 +130,19 @@ jobs:
           xcodebuild -quiet -project apple/Allinone.xcodeproj -scheme Allinone -configuration Release -destination 'generic/platform=iOS' -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
           mkdir -p Payload
           cp -R build/Build/Products/Release-iphoneos/Allinone.app Payload/
+          # Ad-hoc signature so the IPA carries its entitlements (increased memory limit);
+          # SideStore/AltStore/iloader keep them when they re-sign with your account.
+          for f in Payload/Allinone.app/Frameworks/*.framework; do codesign --force --sign - --timestamp=none "$f"; done
+          codesign --force --sign - --timestamp=none --entitlements apple/Allinone.entitlements Payload/Allinone.app
+          codesign -d --entitlements - Payload/Allinone.app
           zip -qry Allinone-unsigned.ipa Payload
+          ls -la Allinone-unsigned.ipa
       - uses: actions/upload-artifact@v4
         with:
           name: Allinone-unsigned
           path: Allinone-unsigned.ipa
       - name: Boot both upstream gateways inside the iOS app
-        run: bash apple/MobileNode/simulator.sh
+        run: bash apple/MobileNode/simulator.sh "$RUNNER_TEMP/mobile-assets"
       - name: Exercise coding sessions, project writes and routing
         run: |
           swiftc -o /tmp/studio-check AllinoneClient.swiftpm/LocalLink.swift apple/Native/Routing.swift apple/Native/Workspace.swift apple/Native/CodingAgent.swift apple/Native/Exchange.swift apple/Tests/NativeStudioCheck.swift

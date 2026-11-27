@@ -156,7 +156,7 @@ struct Notebook: Codable {
         try saveProviders()
     }
     func storeProvider(_ p: Provider, key: String) throws {
-        if p.style != .onDevice { _ = try NativeAPI.endpoint(p) }
+        if p.style != .onDevice && p.style != .localModel { _ = try NativeAPI.endpoint(p) }
         guard !p.name.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else { throw LinkError.message("أدخل اسم المزود") }
         try Credentials.save(key,p.id)
         if let index = providers.firstIndex(where: { $0.id == p.id }) { providers[index] = p }

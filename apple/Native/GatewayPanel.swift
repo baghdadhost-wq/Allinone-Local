@@ -1,27 +1,74 @@
 import SwiftUI
 import WebKit
 
+/// Archives pinned at build time (apple/Vendor/gateways.json, made by prepare.sh).
+struct GatewayManifest: Decodable {
+    struct Asset: Decodable { let file: String; let size: Int64; let sha256: String; let version: String; let revision: String }
+    let tag: String
+    let base: String
+    let assets: [String:Asset]
+    static let bundled: GatewayManifest? = Bundle.main.url(forResource:"gateways",withExtension:"json")
+        .flatMap { try? Data(contentsOf:$0) }.flatMap { try? JSONDecoder().decode(GatewayManifest.self,from:$0) }
+}
+
 @MainActor final class MobileGateways: ObservableObject {
     static let shared = MobileGateways()
-    private let dir = FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("MobileGateways")
+    let dir = FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("MobileGateways")
     @Published private(set) var desired = [String:Bool]()
     @Published private(set) var state = [String:String]()
     @Published var problem = ""
     private var timer: Timer?
+    let manifest = GatewayManifest.bundled
     private init() {
+        Downloads.excludeFromBackup(dir)
         // Restore the last choice so gateways that were on keep running after a relaunch.
         if let data = try? Data(contentsOf:dir.appendingPathComponent("desired.json")),
            let saved = try? JSONDecoder().decode([String:Bool].self,from:data) {
             desired = saved
             if saved.values.contains(true) {
                 do { try startSupervisor() } catch { problem = error.localizedDescription }
+                for (name,on) in saved where on { download(name) }
             }
         }
+    }
+    static func downloadID(_ name: String) -> String { "gateway-" + name }
+    func installed(_ name: String) -> Bool {
+        guard let asset = manifest?.assets[name] else { return false }
+        return FileManager.default.fileExists(atPath:dir.appendingPathComponent(asset.revision).appendingPathComponent(".ready").path)
+    }
+    private func archive(_ name: String) -> URL? {
+        manifest?.assets[name].map { dir.appendingPathComponent("downloads").appendingPathComponent($0.file) }
+    }
+    func downloaded(_ name: String) -> Bool { archive(name).map { FileManager.default.fileExists(atPath:$0.path) } ?? false }
+    /// True while the gateway still needs its files (downloading or unpacking).
+    func preparing(_ name: String) -> Bool {
+        !installed(name) || ["missing","installing"].contains(state[name] ?? "")
+    }
+    /// Fetches the gateway archive from the GitHub release if it is not on the device yet.
+    func download(_ name: String) {
+        guard let manifest, let asset = manifest.assets[name], let target = archive(name),
+              !installed(name), !downloaded(name), let url = URL(string:manifest.base + asset.file) else { return }
+        Downloads.shared.start(Self.downloadID(name),url:url,to:target,size:asset.size,sha256:asset.sha256)
+    }
+    /// Deletes the unpacked gateway to free space. Accounts and keys are kept.
+    func remove(_ name: String) {
+        set(name,enabled:false)
+        Downloads.shared.pause(Self.downloadID(name))
+        guard let asset = manifest?.assets[name] else { return }
+        DispatchQueue.main.asyncAfter(deadline:.now() + 1.5) { [dir] in
+            try? FileManager.default.removeItem(at:dir.appendingPathComponent(asset.revision))
+            try? FileManager.default.removeItem(at:dir.appendingPathComponent("downloads").appendingPathComponent(asset.file))
+            self.objectWillChange.send()
+        }
+    }
+    func size(_ name: String) -> String {
+        ByteCountFormatter.string(fromByteCount:manifest?.assets[name]?.size ?? 0,countStyle:.file)
     }
     private func startSupervisor() throws {
         guard timer == nil else { return }
         let bundle = Bundle.main.bundleURL
-        guard FileManager.default.fileExists(atPath:bundle.appendingPathComponent("gateways.dat").path) else { throw LinkError.message("ملفات البوابتين مفقودة") }
+        guard manifest != nil else { throw LinkError.message("قائمة ملفات البوابتين مفقودة من التطبيق") }
+        try FileManager.default.createDirectory(at:dir.appendingPathComponent("downloads"),withIntermediateDirectories:true)
         try? FileManager.default.removeItem(at:dir.appendingPathComponent("state.json"))
         EmbeddedNode.start(bundle.appendingPathComponent("supervisor.cjs").path,state:dir.path,bundle:bundle.path)
         timer = Timer.scheduledTimer(withTimeInterval:1,repeats:true) { [weak self] _ in Task { @MainActor in self?.refresh() } }
@@ -35,15 +82,20 @@ import WebKit
             try startSupervisor()
             desired = next
             problem = ""
+            if enabled { download(name) }
         } catch { problem = error.localizedDescription }
     }
-    /// Ask the supervisor to restart a stopped or crashed gateway now ("install" retries unpacking).
+    /// Ask the supervisor to restart a stopped or crashed gateway now (also retries unpacking).
     func restart(_ name: String) {
-        if name != "install", desired[name] != true { set(name,enabled:true); return }
+        let name = name == "install" ? (["omni","free"].first { failure($0) != nil } ?? name) : name
+        if desired[name] != true { set(name,enabled:true); return }
+        Downloads.shared.clearError(Self.downloadID(name))
+        download(name)
         try? Data().write(to:dir.appendingPathComponent("restart-" + name))
-        if name != "install" { state[name] = "starting" } else { state["install"] = "installing" }
+        state[name] = installed(name) ? "starting" : "installing"
     }
     func failure(_ name: String) -> String? {
+        if let error = Downloads.shared.errors[Self.downloadID(name)] { return "error: " + error }
         for key in [name,"install"] { if let value = state[key], value.hasPrefix("error:") { return value } }
         return nil
     }
@@ -67,6 +119,7 @@ private struct GatewayDashboard: UIViewRepresentable {
 
 struct GatewayPanel: View {
     @ObservedObject var service = MobileGateways.shared
+    @ObservedObject var downloads = Downloads.shared
     @ObservedObject var studio: Studio
     var initialPage: URL? = nil
     @State private var openedInitialPage = false
@@ -136,12 +189,27 @@ struct GatewayPanel: View {
                             let name = id == "omni" ? "OmniRoute" : "FreeLLMAPI"
                             let endpoint = id == "omni" ? "http://127.0.0.1:20128" : "http://127.0.0.1:3001"
                             Section(name) {
+                                let job = downloads.active[MobileGateways.downloadID(id)]
+                                if !service.installed(id) {
+                                    if let job {
+                                        ProgressView(value:job.fraction) {
+                                            Text(job.verifying ? "التحقق من الملف…" : "تنزيل " + name)
+                                        } currentValueLabel: {
+                                            Text(ByteCountFormatter.string(fromByteCount:job.received,countStyle:.file) + " / " + service.size(id))
+                                        }
+                                        Button("إيقاف التنزيل مؤقتا") { downloads.pause(MobileGateways.downloadID(id)) }
+                                    } else if !service.downloaded(id) {
+                                        Button("تنزيل " + name + " (" + service.size(id) + ")") { service.set(id,enabled:true) }
+                                        Text("تُحمَّل البوابة من إصدار GitHub الخاص بالتطبيق ويُتحقق من بصمتها قبل فكها.").font(.footnote)
+                                    }
+                                    if let error = downloads.errors[MobileGateways.downloadID(id)] { Text(error).font(.footnote).foregroundStyle(.red) }
+                                }
                                 Toggle("تشغيل على هذا الجهاز",isOn:Binding(get:{service.desired[id] ?? false},set:{service.set(id,enabled:$0)}))
                                 if service.desired[id] == true {
-                                    let status = service.state[id] ?? service.state["install"] ?? "installing"
-                                    Text(["installing":"جار تجهيز الملفات لأول تشغيل…","ready":"جار بدء البوابة…","starting":"جار بدء البوابة…","listening":"تعمل محليا","stopped":"متوقفة"][status] ?? status)
-                                    if status.hasPrefix("error:") {
-                                        Button("إعادة تشغيل " + name) { service.restart(service.state["install"]?.hasPrefix("error:") == true ? "install" : id) }
+                                    let status = service.state[id] ?? "installing"
+                                    Text(["missing":job == nil ? "بانتظار ملفات البوابة" : "جار التنزيل…","installing":"جار تجهيز الملفات لأول تشغيل…","ready":"جار بدء البوابة…","starting":"جار بدء البوابة…","listening":"تعمل محليا","stopped":"متوقفة"][status] ?? status)
+                                    if status.hasPrefix("error:") || downloads.errors[MobileGateways.downloadID(id)] != nil {
+                                        Button("إعادة المحاولة " + name) { service.restart(id) }
                                     }
                                     Text(endpoint + "/v1").textSelection(.enabled)
                                     Button("فتح لوحة " + name) { selected = URL(string:endpoint) }.disabled(status != "listening")
@@ -156,6 +224,9 @@ struct GatewayPanel: View {
                                             }
                                         }
                                     }
+                                }
+                                if service.installed(id) {
+                                    Button("حذف ملفات " + name + " (تبقى الحسابات)",role:.destructive) { service.remove(id) }
                                 }
                             }
                         }
