@@ -207,12 +207,15 @@ final class LocalEngine {
         defer { roles.forEach { free($0) }; contents.forEach { free($0) } }
         var chat = zip(roles, contents).map { llama_chat_message(role: UnsafePointer($0!), content: UnsafePointer($1!)) }
         let total = messages.reduce(0) { $0 + $1.1.utf8.count } * 2 + 4096
+        let count = chat.count
         func apply(_ template: UnsafePointer<CChar>) -> String? {
             var buffer = [CChar](repeating: 0, count: total)
-            var n = llama_chat_apply_template(template, &chat, chat.count, true, &buffer, Int32(buffer.count))
-            if n > buffer.count {
+            var length = Int32(buffer.count)
+            var n = llama_chat_apply_template(template, &chat, count, true, &buffer, length)
+            if n > length {
                 buffer = [CChar](repeating: 0, count: Int(n) + 1)
-                n = llama_chat_apply_template(template, &chat, chat.count, true, &buffer, Int32(buffer.count))
+                length = Int32(buffer.count)
+                n = llama_chat_apply_template(template, &chat, count, true, &buffer, length)
             }
             guard n > 0 else { return nil }
             return String(decoding: buffer[0..<Int(n)].map { UInt8(bitPattern: $0) }, as: UTF8.self)

@@ -9,10 +9,11 @@ enum ModelStore {
         return url
     }()
     static func url(for file: String) -> URL { dir.appendingPathComponent((file as NSString).lastPathComponent) }
-    static var installed: [(file: String, size: Int64)] {
+    struct Installed: Equatable { let file: String; let size: Int64 }
+    static var installed: [Installed] {
         let items = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey])) ?? []
         return items.filter { $0.pathExtension.lowercased() == "gguf" }
-            .map { ($0.lastPathComponent, Int64((try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)) }
+            .map { Installed(file: $0.lastPathComponent, size: Int64((try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)) }
             .sorted { $0.file < $1.file }
     }
     /// 0 = choose automatically from free memory.

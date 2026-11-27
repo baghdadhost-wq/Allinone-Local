@@ -28,18 +28,18 @@ import UIKit
         let job = Job(url: url, destination: destination, size: size, sha256: sha256?.lowercased(), magic: magic)
         jobs[id] = job
         UIApplication.shared.isIdleTimerDisabled = true
-        job.progress = { [weak self] received, total in
+        job.progress = { [weak self, weak job] received, total in
             Task { @MainActor in
-                guard let self, self.jobs[id] === job else { return }
+                guard let self, let job, self.jobs[id] === job else { return }
                 self.active[id] = Item(received: received, total: total > 0 ? total : (size ?? 0))
             }
         }
-        job.verifying = { [weak self] in
-            Task { @MainActor in if let self, self.jobs[id] === job { self.active[id]?.verifying = true } }
+        job.verifying = { [weak self, weak job] in
+            Task { @MainActor in if let self, let job, self.jobs[id] === job { self.active[id]?.verifying = true } }
         }
-        job.finish = { [weak self] error in
+        job.finish = { [weak self, weak job] error in
             Task { @MainActor in
-                guard let self, self.jobs[id] === job else { return }
+                guard let self, let job, self.jobs[id] === job else { return }
                 self.jobs[id] = nil
                 self.active[id] = nil
                 if let error { self.errors[id] = error } else { done() }
@@ -60,7 +60,7 @@ import UIKit
     func clearError(_ id: String) { errors[id] = nil }
 
     /// Marks a folder so iCloud and device backups skip it (models are many gigabytes).
-    static func excludeFromBackup(_ folder: URL) {
+    nonisolated static func excludeFromBackup(_ folder: URL) {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         var url = folder
         var values = URLResourceValues()
