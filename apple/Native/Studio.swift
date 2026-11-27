@@ -87,6 +87,11 @@ struct Notebook: Codable {
         undoChange = nil
         track("تراجع عن " + change.path)
     }
+    /// Projects marked local-only never send prompts or files to a network provider.
+    var localOnly: Bool {
+        get { UserDefaults.standard.bool(forKey:"privacy.localOnly." + notebookID) }
+        set { objectWillChange.send(); UserDefaults.standard.set(newValue,forKey:"privacy.localOnly." + notebookID); track(newValue ? "المشروع محلي فقط" : "إلغاء وضع المحلي فقط") }
+    }
     func isPreapproved(_ thread: String) -> Bool { book.preapproved?.contains(thread) == true }
     func setPreapproved(_ thread: String, on: Bool) {
         var set = Set(book.preapproved ?? [])
@@ -214,7 +219,14 @@ struct Notebook: Codable {
         // On failure, try on-device models first: they need no network or quota.
         let others = providers.filter { p in preferred.map { p.id != $0.id && p.base != $0.base } ?? true }
         let fallback = others.filter { $0.style == .localModel } + others.filter { $0.style != .localModel }
-        let config = preferred.map { [$0] + fallback } ?? providers
+        var config = preferred.map { [$0] + fallback } ?? providers
+        if localOnly {
+            // Gateways on 127.0.0.1 forward to cloud providers, so only on-device models qualify.
+            config = config.filter { $0.style == .localModel || $0.style == .onDevice }
+            guard !config.isEmpty, preferred.map({ $0.style == .localModel || $0.style == .onDevice }) ?? true else {
+                throw LinkError.message("هذا المشروع محلي فقط: اختر نموذجا محليا أو Apple Intelligence، أو ألغِ «لا يغادر الجهاز» من النماذج المحلية.")
+            }
+        }
         let automatic = preapprove ?? isPreapproved(thread)
         autoChanges = []
         if automatic { undoChange = nil }

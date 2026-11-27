@@ -43,7 +43,7 @@ import UIKit
                 self.jobs[id] = nil
                 self.active[id] = nil
                 if let error { self.errors[id] = error } else { done() }
-                if self.jobs.isEmpty { UIApplication.shared.isIdleTimerDisabled = false }
+                if self.jobs.isEmpty && !ModelServer.shared.running { UIApplication.shared.isIdleTimerDisabled = false }
             }
         }
         job.begin()
@@ -54,7 +54,7 @@ import UIKit
         guard let job = jobs.removeValue(forKey: id) else { return }
         job.pause()
         active[id] = nil
-        if jobs.isEmpty { UIApplication.shared.isIdleTimerDisabled = false }
+        if jobs.isEmpty && !ModelServer.shared.running { UIApplication.shared.isIdleTimerDisabled = false }
     }
 
     func clearError(_ id: String) { errors[id] = nil }

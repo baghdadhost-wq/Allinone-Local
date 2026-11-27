@@ -205,10 +205,11 @@ struct ModelLibraryPanel: View {
                     Text("تلقائي").tag(0)
                     ForEach([4096, 8192, 16384, 32768], id: \.self) { Text("\($0)").tag($0) }
                 }.onChange(of: context) { value in ModelStore.contextSetting = value; LocalEngine.shared.unload() }
+                Toggle("هذا المشروع لا يغادر الجهاز", isOn: $studio.localOnly)
                 if gateways.desired.values.contains(true) {
                     Button("إيقاف البوابات لتوفير الذاكرة") { for name in ["omni", "free"] { gateways.set(name, enabled: false) } }
                 }
-            } footer: { Text("النموذج والمحادثات تبقى على الجهاز ولا تحتاج إنترنت بعد التنزيل. الملفات مستثناة من نسخ iCloud الاحتياطي.") }
+            } footer: { Text("النموذج والمحادثات تبقى على الجهاز ولا تحتاج إنترنت بعد التنزيل. الملفات مستثناة من نسخ iCloud الاحتياطي. عند تفعيل «لا يغادر الجهاز» يرفض المشروع الحالي أي مزود سحابي أو بوابة.") }
 
             Section("على الجهاز") {
                 if library.installed.isEmpty { Text("لا توجد نماذج بعد. نزّل واحدا من القائمة أو استورد ملف GGUF.") }

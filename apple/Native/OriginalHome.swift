@@ -43,6 +43,7 @@ struct OriginalHome: View {
                             NavigationLink("اتصال بمضيف آخر") { Chat() }
                             NavigationLink("البوابات المحلية") { GatewayPanel(studio:host.studio) }
                             NavigationLink("النماذج المحلية") { ModelLibraryPanel(studio:host.studio) }
+                            NavigationLink("خادم النماذج لـ Claude Code") { ModelServerPanel() }
                             NavigationLink("الذاكرة") { MemoryPanel() }
                             NavigationLink("ملفات المشروع ومراجعة التعديلات") { Workbench(studio:host.studio,host:host) }
                         }.navigationTitle("إعدادات الجهاز").toolbar { Button("تم") { panel = nil } }

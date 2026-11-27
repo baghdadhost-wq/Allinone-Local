@@ -3,7 +3,7 @@ import Network
 import CryptoKit
 import Darwin
 
-private func wifiAddress() -> String? {
+func wifiAddress() -> String? {
     var first: UnsafeMutablePointer<ifaddrs>?
     guard getifaddrs(&first) == 0, let first else { return nil }
     defer { freeifaddrs(first) }
